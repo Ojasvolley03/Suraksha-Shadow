@@ -1,36 +1,32 @@
 /**
- * BSA 2023 Section 63 & On-Chain Evidence Integrity Block Builder
- * -----------------------------------------------------------
+ * BSA 2023 Section 63 & Polygon On-Chain Evidence Integrity Block Builder
+ * ---------------------------------------------------------------------
  * Creates composite evidence blocks that cryptographically bind
  * audio capture data to GPS metadata and timestamps, and anchors
- * the resulting digest onto the Polygon blockchain.
+ * the resulting digest onto Polygon Amoy Testnet.
  *
  * The composite hash format is:
  *   SHA-256( [metadata_length: 4 bytes BE] + [metadata JSON] + [audio bytes] )
  *
  * This exact binary format is replicated server-side during
- * verification, so both sides must agree on the byte layout.
+ * verification, so both sides agree on the byte layout.
  *
  * The resulting `clientHash` is the capture-time integrity marker.
  * To eliminate reliance on central server trust, this hash is anchored
- * onto Polygon (Amoy Testnet / Polygon PoS), making evidence timestamps
+ * onto Polygon Amoy (Chain ID 80002), making evidence timestamps
  * and authenticity mathematically provable in a court of law.
  */
 
-export const POLYGON_NETWORKS = {
-  AMOY_TESTNET: {
-    chainId: 80002,
-    name: "Polygon Amoy Testnet",
-    explorerBase: "https://amoy.polygonscan.com/tx/",
-    notaryContract: "0x71C840A831a28C3A48bB1b1F369c0d24cCE3683C",
-  },
-  POLYGON_MAINNET: {
-    chainId: 137,
-    name: "Polygon PoS Mainnet",
-    explorerBase: "https://polygonscan.com/tx/",
-    notaryContract: "0x39a3Bf822De189e47265A4F79F12b059F3Dea2B9",
-  },
+export const POLYGON_AMOY_CONFIG = {
+  chainId: 80002,
+  name: "Polygon Amoy Testnet",
+  explorerBase: "https://amoy.polygonscan.com/tx/",
+  notaryContract: "0x8E14Fa95b6a3780D2D794F01235F69f45C99f24E",
+  verifiedTxHash: "0x93838ab7dae0698561e96e95a8243c81710980c604a132b34e4287914178c4bb",
+  rpcEndpoint: "https://polygon-amoy-bor-rpc.publicnode.com",
 };
+
+export const MST_TESTNET_CONFIG = POLYGON_AMOY_CONFIG; // Backward-compatibility alias
 
 /**
  * Creates a composite evidence block from an audio recording and GPS metadata.
@@ -76,20 +72,3 @@ export async function createEvidenceBlock(audioBlob, coords) {
     clientHash,
   };
 }
-
-/**
- * Derives a deterministic pseudo-txHash for testnet anchoring or simulation
- * if live Web3 signer RPC is in offline fallback mode.
- */
-export function derivePolygonTxHash(clientHash, timestampISO) {
-  const seed = `${clientHash}|${timestampISO}|POLYGON_AMOY`;
-  let hash = 0;
-  for (let i = 0; i < seed.length; i++) {
-    hash = (hash << 5) - hash + seed.charCodeAt(i);
-    hash |= 0;
-  }
-  const hexPart = Math.abs(hash).toString(16).padStart(8, "0");
-  const base = (clientHash || "").padEnd(56, "0").slice(0, 56);
-  return `0x${base}${hexPart}`;
-}
-

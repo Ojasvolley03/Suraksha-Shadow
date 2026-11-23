@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, useCallback } from "react";
+import { useEffect, useRef, useState, useCallback, memo } from "react";
 import L from "leaflet";
 import "leaflet/dist/leaflet.css";
 import { reverseGeocode, formatCoords } from "../lib/geo";
@@ -7,15 +7,50 @@ import {
   EMERGENCY_HELPLINES,
 } from "../lib/safeHavensData";
 
-export default function LiveSafetyMapView({ onBack, defaultFilter = "all" }) {
+const TILE_LAYERS = {
+  streets: {
+    name: "Map",
+    icon: "🗺️",
+    url: "https://{s}.google.com/vt/lyrs=m&x={x}&y={y}&z={z}",
+    options: {
+      maxZoom: 20,
+      subdomains: ["mt0", "mt1", "mt2", "mt3"],
+      attribution: "&copy; Google Maps",
+    },
+  },
+  satellite: {
+    name: "Satellite",
+    icon: "🛰️",
+    url: "https://{s}.google.com/vt/lyrs=y&x={x}&y={y}&z={z}",
+    options: {
+      maxZoom: 20,
+      subdomains: ["mt0", "mt1", "mt2", "mt3"],
+      attribution: "&copy; Google Maps",
+    },
+  },
+  terrain: {
+    name: "Terrain",
+    icon: "⛰️",
+    url: "https://{s}.google.com/vt/lyrs=p&x={x}&y={y}&z={z}",
+    options: {
+      maxZoom: 20,
+      subdomains: ["mt0", "mt1", "mt2", "mt3"],
+      attribution: "&copy; Google Maps",
+    },
+  },
+};
+
+function LiveSafetyMapViewComponent({ onBack, defaultFilter = "all" }) {
   const mapContainerRef = useRef(null);
   const mapInstanceRef = useRef(null);
+  const currentTileLayerRef = useRef(null);
   const markerRef = useRef(null);
   const circleRef = useRef(null);
   const sanctuaryMarkersRef = useRef([]);
   const watchIdRef = useRef(null);
   const initialCenterSetRef = useRef(false);
 
+  const [activeLayer, setActiveLayer] = useState("streets");
   const [coords, setCoords] = useState(null); // { lat, lng, accuracy, timestamp }
   const [address, setAddress] = useState("");
   const [permissionStatus, setPermissionStatus] = useState("prompt"); // 'prompt' | 'granted' | 'denied' | 'unavailable'
@@ -289,6 +324,21 @@ export default function LiveSafetyMapView({ onBack, defaultFilter = "all" }) {
     }
   }, [coords, updateMapPosition, requestLiveLocation]);
 
+  // Switch tile layer
+  const switchLayer = useCallback((layerKey) => {
+    if (!mapInstanceRef.current || !TILE_LAYERS[layerKey]) return;
+    const map = mapInstanceRef.current;
+
+    if (currentTileLayerRef.current) {
+      map.removeLayer(currentTileLayerRef.current);
+    }
+
+    const { url, options } = TILE_LAYERS[layerKey];
+    const newLayer = L.tileLayer(url, options).addTo(map);
+    currentTileLayerRef.current = newLayer;
+    setActiveLayer(layerKey);
+  }, []);
+
   // Initialize Leaflet map
   useEffect(() => {
     initialCenterSetRef.current = false;
@@ -305,12 +355,10 @@ export default function LiveSafetyMapView({ onBack, defaultFilter = "all" }) {
       attributionControl: true,
     }).setView(initialPos, initialZoom);
 
-    // OpenStreetMap tile layer
-    L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
-      maxZoom: 19,
-      attribution:
-        '&copy; <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener noreferrer">OpenStreetMap</a> contributors',
-    }).addTo(map);
+    // Modern Carto Voyager tiles (clean Google / Apple Maps look)
+    const initialConfig = TILE_LAYERS.streets;
+    const tileLayer = L.tileLayer(initialConfig.url, initialConfig.options).addTo(map);
+    currentTileLayerRef.current = tileLayer;
 
     mapInstanceRef.current = map;
 
@@ -411,6 +459,22 @@ export default function LiveSafetyMapView({ onBack, defaultFilter = "all" }) {
           className="leaflet-safety-canvas"
           style={{ minHeight: 460, borderRadius: 12 }}
         />
+
+        {/* Floating Layer Switcher */}
+        <div className="app-map-layer-switch">
+          {Object.entries(TILE_LAYERS).map(([key, config]) => (
+            <button
+              key={key}
+              type="button"
+              className={`app-map-layer-btn ${activeLayer === key ? "is-active" : ""}`}
+              onClick={() => switchLayer(key)}
+              title={`Switch to ${config.name} Map`}
+            >
+              <span>{config.icon}</span>
+              <span>{config.name}</span>
+            </button>
+          ))}
+        </div>
 
         {/* 📍 My Location Button */}
         <button
@@ -716,6 +780,8 @@ export default function LiveSafetyMapView({ onBack, defaultFilter = "all" }) {
     </div>
   );
 }
+
+export default memo(LiveSafetyMapViewComponent);
 
 function containerHasStaleLeaflet(el) {
   return el && Boolean(el._leaflet_id);

@@ -1,4 +1,5 @@
-import { useState, useRef, useEffect, useCallback } from "react";
+﻿import { useState, useRef, useEffect, useCallback } from "react";
+import { createPortal } from "react-dom";
 import {
   computeSha256,
   computeCompositeBurstHash,
@@ -10,8 +11,6 @@ import {
   CameraIcon,
   CheckIcon,
   CopyIcon,
-  ShieldCheckIcon,
-  ShieldAlertIcon,
 } from "./icons";
 
 /**
@@ -114,8 +113,6 @@ export default function CameraWatch({
       stopCameraStream();
     };
   }, [isOpen, startCameraStream, stopCameraStream]);
-
-  if (!isOpen) return null;
 
   // Toggle Camera Front / Back
   const handleToggleFacingMode = () => {
@@ -237,10 +234,16 @@ export default function CameraWatch({
     setTimeout(() => setCopiedHash(null), 2000);
   };
 
+
+
+  if (!isOpen) return null;
+
   const activeFrame =
     burstData?.frames?.[selectedFrameIndex] || burstData?.frames?.[0];
 
-  return (
+  if (typeof document === "undefined") return null;
+
+  return createPortal(
     <div
       style={{
         position: "fixed",
@@ -701,8 +704,8 @@ export default function CameraWatch({
             <div style={{ display: "flex", justifyContent: "space-between" }}>
               <span style={{ color: "var(--mist-dim)" }}>GNSS LOCK:</span>
               <span style={{ color: "var(--secondary)" }}>
-                {burstData.coords?.latitude?.toFixed(4) || "28.6139"}°N,{" "}
-                {burstData.coords?.longitude?.toFixed(4) || "77.2090"}°E
+                {(burstData.coords?.latitude ?? burstData.coords?.lat)?.toFixed(4) || "28.6139"}°N,{" "}
+                {(burstData.coords?.longitude ?? burstData.coords?.lng)?.toFixed(4) || "77.2090"}°E
               </span>
             </div>
           </div>
@@ -742,6 +745,7 @@ export default function CameraWatch({
           </button>
         </div>
       </div>
-    </div>
+    </div>,
+    document.body
   );
 }

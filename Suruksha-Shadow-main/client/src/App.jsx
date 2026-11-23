@@ -1,25 +1,28 @@
 import { useState, useCallback, useEffect, useRef } from "react";
-import { useShieldDetection, requestDevicePermissions, requestMotionPermission } from "./hooks/useShieldDetection";
+import { useShieldDetection, requestDevicePermissions } from "./hooks/useShieldDetection";
 import { useGestureDetection } from "./hooks/useGestureDetection";
 import { useGuardianPing } from "./hooks/useGuardianPing";
 import { useAmbientAudioStream } from "./hooks/useAmbientAudioStream";
 import { useFakeCall } from "./hooks/useFakeCall";
 import { useBackgroundKeepAlive } from "./hooks/useBackgroundKeepAlive";
 import { useEvidenceVault } from "./hooks/useEvidenceVault";
-import { useEmergencySms, triggerWhatsAppSos, triggerCarrierSms } from "./hooks/useEmergencySms";
+import { useEmergencySms } from "./hooks/useEmergencySms";
 import { useHeartbeat } from "./hooks/useHeartbeat";
 import { useSafeZones } from "./hooks/useSafeZones";
 import { useRouteGuard } from "./hooks/useRouteGuard";
 import { useOfflineSync } from "./hooks/useOfflineSync";
 import {
   saveEmergencyEvent,
-  saveGpsPoint,
   logOfflineEvent,
   enqueueSync,
   updateSyncItemStatus,
   updateEmergencyServerId,
   STORES,
 } from "./lib/offlineDb";
+import {
+  startContinuousAudioNotarization,
+  stopContinuousAudioNotarization,
+} from "./lib/evidenceStore";
 import EvidenceVault from "./components/EvidenceVault";
 import SaharaChat from "./components/SaharaChat";
 import GuidedNextSteps from "./components/GuidedNextSteps";
@@ -57,7 +60,6 @@ import {
   HandIcon,
   EyeIcon,
   EyeOffIcon,
-  HomeIcon,
   HeartbeatIcon,
   NavigationIcon,
   MapPinIcon,
@@ -65,7 +67,6 @@ import {
 import logoImg from "./assets/logo.jpg";
 import { getUserId } from "./lib/user";
 import {
-  getWhatsAppAlertUrl,
   shareEmergencyAlert,
   reverseGeocode,
   formatCoords,
@@ -123,7 +124,7 @@ export default function App() {
   const [gpsStatus, setGpsStatus] = useState("acquiring"); // 'acquiring' | 'locked' | 'denied' | 'unavailable'
 
   // Offline IndexedDB Resilience Engine Hook
-  const { isOnline, pendingCount, isSyncing, triggerManualSync } = useOfflineSync({ apiBaseUrl: API_BASE_URL });
+  const { isOnline: _isOnline, pendingCount: _pendingCount, isSyncing: _isSyncing, triggerManualSync: _triggerManualSync } = useOfflineSync({ apiBaseUrl: API_BASE_URL });
 
   // Continuous Real-Time High-Accuracy Device Geolocation Watcher
   useEffect(() => {
@@ -258,11 +259,31 @@ export default function App() {
       .then((res) => (res.ok ? res.json() : { contacts: [] }))
       .then((data) => {
         const list = data.contacts || [];
-        setContacts(list);
-        setContactCount(list.length);
+        const finalContacts =
+          list.length > 0
+            ? list
+            : [
+                {
+                  id: "contact-primary",
+                  name: "Primary Guardian (Direct Carrier)",
+                  phone: "8800948288",
+                  relationship: "Primary Guardian",
+                },
+              ];
+        setContacts(finalContacts);
+        setContactCount(finalContacts.length);
       })
       .catch(() => {
-        setContactCount(2); // fallback count for instant arm capability
+        const fallback = [
+          {
+            id: "contact-primary",
+            name: "Primary Guardian (Direct Carrier)",
+            phone: "8800948288",
+            relationship: "Primary Guardian",
+          },
+        ];
+        setContacts(fallback);
+        setContactCount(1);
       });
 
     fetch(`${API_BASE_URL}/api/consent/${USER_ID}`)
@@ -310,6 +331,39 @@ export default function App() {
   }, [activeEventId]);
 
   const isFiringRef = useRef(false);
+
+  // Ensure isFiringRef is always cleared when emergency is not active
+  useEffect(() => {
+    if (!activeEventId) {
+      isFiringRef.current = false;
+      resetShieldRef.current?.();
+      resetGestureRef.current?.();
+    }
+  }, [activeEventId]);
+
+  // Continuous 10-Second Audio Chunk Slicer & Polygon On-Chain Auto-Notarizer (Active Emergency Mode)
+  // Runs during active SOS emergency to build forensic evidence vault without interfering with standby codeword listening
+  useEffect(() => {
+    let isMounted = true;
+    if (activeEventId) {
+      startContinuousAudioNotarization({
+        sosId: activeEventId,
+        onChunkNotarized: () => {
+          if (isMounted) {
+            setEvidenceRefreshTick((n) => n + 1);
+          }
+        },
+      }).catch((err) => {
+        console.warn("[App] Continuous audio notarization startup notice:", err.message);
+      });
+    } else {
+      stopContinuousAudioNotarization();
+    }
+    return () => {
+      isMounted = false;
+      stopContinuousAudioNotarization();
+    };
+  }, [activeEventId]);
 
   const fireSOS = useCallback(
     async (triggerInput) => {
@@ -416,10 +470,20 @@ export default function App() {
       setSosError(null);
       setSaharaMessages([]);
       fakeCall.start();
-      evidenceVault?.startAutomatedCapture?.(10000, localEventId);
+      const guardianPhones = contacts.length > 0 ? contacts.map((c) => c.phone) : ["8800948288"];
+      const allRecipientPhones = [...new Set([...guardianPhones, "8800948288"])];
+
       emergencySms.dispatchAlert(
-        contacts.map((c) => c.phone),
-        "CORAL"
+        allRecipientPhones,
+        "EMERGENCY ACTIVE",
+        {
+          shareToken: localShareToken,
+          location: {
+            lat: sendLat,
+            lng: sendLng,
+            address: currentCoords?.address || "Knowledge Park III, Uttar Pradesh",
+          },
+        }
       );
 
       // 3. SERVER SYNCHRONIZATION: Register canonical event on backend in background
@@ -435,6 +499,7 @@ export default function App() {
             details: triggerDetails,
             lat: sendLat,
             lng: sendLng,
+            address: currentCoords?.address || "Knowledge Park III, Uttar Pradesh",
           }),
         });
         let data = {};
@@ -466,11 +531,11 @@ export default function App() {
 
   const {
     transcript,
-    micStatus,
+    micStatus: _micStatus,
     audioLevel,
     audioDb,
     motionMagnitude,
-    syllableCount,
+    syllableCount: _syllableCount,
     isWhisperTranscribing,
     simulateVoiceTrigger,
     reset: resetShield,
@@ -485,7 +550,7 @@ export default function App() {
     resetShieldRef.current = resetShield;
   }, [resetShield]);
 
-  const [cameraViewfinderOpen, setCameraViewfinderOpen] = useState(true);
+  const [cameraViewfinderOpen, setCameraViewfinderOpen] = useState(false);
 
   const {
     isCameraActive,
@@ -577,6 +642,9 @@ export default function App() {
       resetGesture();
     } else {
       await requestDevicePermissions();
+      resetShield();
+      resetGesture();
+      isFiringRef.current = false;
       setArmed(true);
       if (typeof navigator !== "undefined" && "vibrate" in navigator) {
         try {
@@ -590,9 +658,22 @@ export default function App() {
 
   const arm = toggleArm;
 
+  // Opens Optical Burst modal, pausing gesture camera first to avoid dual-stream conflict
+  const handleOpenBurstModal = useCallback(() => {
+    if (isCameraActive) {
+      stopCamera();
+      setCameraViewfinderOpen(false);
+    }
+    setShowOpticalBurstModal(true);
+  }, [isCameraActive, stopCamera]);
+
   const handleToggleCamera = async () => {
     if (!isCameraActive && !armed) {
       await arm();
+    }
+    if (!isCameraActive) {
+      // Auto-open the viewfinder so user sees the live camera feed
+      setCameraViewfinderOpen(true);
     }
     toggleCameraWatch();
   };
@@ -767,7 +848,7 @@ export default function App() {
               <span className="brand-title">
                 Suraksha <em style={{ fontStyle: "normal", color: "var(--ember)" }}>Shadow</em>
               </span>
-              <span className="brand-subtitle">Personal Safety &amp; Legal Shield</span>
+              <span className="brand-subtitle">Personal Safety & Legal Shield</span>
             </div>
           </div>
 
@@ -870,9 +951,9 @@ export default function App() {
 
       {/* --- SOS Error Banner --- */}
       {sosError && (
-        <div className="sos-error-banner rise-fade" onClick={() => fireSOS("manual")}>
+        <div className="sos-error-banner rise-fade">
           <span>⚠️ {sosError}</span>
-          <button className="btn-primary" style={{ padding: "6px 14px", fontSize: 13 }}>
+          <button className="btn-primary" style={{ padding: "6px 14px", fontSize: 13 }} onClick={() => fireSOS("manual")}>
             Retry
           </button>
         </div>
@@ -892,6 +973,48 @@ export default function App() {
             <div className="emergency-banner-timer">
               Live for {formatElapsed(emergencyElapsedSecs)} · Contacts notified
             </div>
+          </div>
+
+          {/* Real-Time Automated SMS Dispatch Notification Banner */}
+          <div
+            className="card rise-fade"
+            style={{
+              background: "rgba(0, 230, 118, 0.12)",
+              border: "1px solid rgba(0, 230, 118, 0.45)",
+              padding: "12px 16px",
+              display: "flex",
+              justifyContent: "space-between",
+              alignItems: "center",
+              flexWrap: "wrap",
+              gap: 10,
+              borderRadius: "var(--radius-sm)",
+            }}
+          >
+            <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+              <span style={{ fontSize: 20 }}>📲</span>
+              <div>
+                <div style={{ fontSize: 13, fontWeight: 700, color: "var(--safe)" }}>
+                  Emergency SMS Automatically Dispatched to 8800948288 & Trusted Guardians
+                </div>
+                <div style={{ fontSize: 11.5, color: "var(--paper)", marginTop: 2 }}>
+                  Live tracking beacon & GPS coordinates transmitted autonomously via GSM Gateway.
+                </div>
+              </div>
+            </div>
+            <span
+              className="tag tag-safe"
+              style={{
+                fontSize: 11,
+                fontWeight: 700,
+                background: "rgba(0, 230, 118, 0.2)",
+                border: "1px solid rgba(0, 230, 118, 0.5)",
+                display: "inline-flex",
+                alignItems: "center",
+                gap: 5,
+              }}
+            >
+              ⚡ AUTO-DISPATCHED
+            </span>
           </div>
 
           {/* Quick Action Matrix for High Distress */}
@@ -1473,7 +1596,7 @@ export default function App() {
 
                     {/* Sensor 5: Optical Burst (BSA 2023 §63) */}
                     <div
-                      onClick={() => setShowOpticalBurstModal(true)}
+                      onClick={handleOpenBurstModal}
                       style={{
                         padding: "6px 8px",
                         borderRadius: 8,
@@ -1594,7 +1717,7 @@ export default function App() {
                     </div>
                     <div>
                       <div style={{ fontSize: 13, fontWeight: 700, color: "var(--paper)" }}>Safe Havens Radar</div>
-                      <div style={{ fontSize: 10.5, color: "var(--mist-dim)" }}>Nearby Sanctuaries &amp; Map</div>
+                      <div style={{ fontSize: 10.5, color: "var(--mist-dim)" }}>Nearby Sanctuaries & Map</div>
                     </div>
                   </button>
 
@@ -1603,7 +1726,7 @@ export default function App() {
                     id="whatsapp-sos-quick-btn"
                     className="utility-card-btn"
                     onClick={() => {
-                      emergencySms.openWhatsAppSos(activeShareToken, currentCoords, "Emergency Distress Alert (1-Tap WhatsApp)");
+                      emergencySms.openWhatsAppSos(contacts.map((c) => c.phone), activeShareToken, currentCoords, "Emergency Distress Alert (1-Tap WhatsApp)");
                     }}
                     style={{ borderColor: "rgba(37, 211, 102, 0.25)" }}
                     title="1-Tap WhatsApp SOS: Direct instant emergency dispatch with live GPS & beacon link"
@@ -1614,7 +1737,7 @@ export default function App() {
                     </div>
                     <div>
                       <div style={{ fontSize: 13, fontWeight: 700, color: "var(--paper)" }}>WhatsApp SOS</div>
-                      <div style={{ fontSize: 10.5, color: "var(--mist-dim)" }}>Beacon Link &amp; GPS Dispatch</div>
+                      <div style={{ fontSize: 10.5, color: "var(--mist-dim)" }}>Beacon Link & GPS Dispatch</div>
                     </div>
                   </button>
 
@@ -1623,7 +1746,7 @@ export default function App() {
                     id="carrier-sms-quick-btn"
                     className="utility-card-btn"
                     onClick={() => {
-                      emergencySms.openCarrierSms(activeShareToken, currentCoords, "Emergency Distress Alert (1-Tap SIM SMS)");
+                      emergencySms.openCarrierSms(contacts.map((c) => c.phone), activeShareToken, currentCoords, "Emergency Distress Alert (1-Tap SIM SMS)");
                     }}
                     style={{ borderColor: "rgba(56, 189, 248, 0.25)" }}
                     title="1-Tap Carrier SMS: Direct device SIM messaging to guardians with GPS coordinates (Zero gateway cost / Works offline)"
@@ -1642,7 +1765,7 @@ export default function App() {
                   <button
                     id="optical-burst-quick-btn"
                     className="utility-card-btn"
-                    onClick={() => setShowOpticalBurstModal(true)}
+                    onClick={handleOpenBurstModal}
                     style={{ borderColor: "rgba(232, 196, 104, 0.3)" }}
                     title="Optical Burst: Rapid 5-frame forensic optical stream with SHA-256 digests (BSA 2023 §63 / FRE 902)"
                   >
@@ -1796,8 +1919,8 @@ export default function App() {
                       <span className="tag" style={{ fontSize: 9.5, padding: "1px 5px" }}>CONFIG</span>
                     </div>
                     <div>
-                      <div style={{ fontSize: 13, fontWeight: 700, color: "var(--paper)" }}>Triggers &amp; Geofence</div>
-                      <div style={{ fontSize: 10.5, color: "var(--mist-dim)" }}>Sensors &amp; Safe Zones</div>
+                      <div style={{ fontSize: 13, fontWeight: 700, color: "var(--paper)" }}>Triggers & Geofence</div>
+                      <div style={{ fontSize: 10.5, color: "var(--mist-dim)" }}>Sensors & Safe Zones</div>
                     </div>
                   </button>
                 </div>
@@ -1979,7 +2102,7 @@ export default function App() {
                   <div className="pt-3" style={{ borderTop: "1px solid var(--line)" }}>
                     <details>
                       <summary style={{ cursor: "pointer", fontSize: 13, fontWeight: 600, color: "var(--ember)", padding: "4px 0" }}>
-                        🛠️ Safety Drills &amp; Sensor Simulations (Test Lab)
+                        🛠️ Safety Drills & Sensor Simulations (Test Lab)
                       </summary>
                       <div style={{ padding: "12px 0 4px", display: "flex", flexDirection: "column", gap: 8 }}>
                         <p className="text-xs text-dim" style={{ margin: 0 }}>
@@ -2166,6 +2289,7 @@ export default function App() {
         isOpen={isFakeCallOpen}
         onClose={() => setIsFakeCallOpen(false)}
         defaultCallerIndex={0}
+        apiBaseUrl={API_BASE_URL}
       />
 
       {/* 2. Acoustic Strobe Anti-Attacker Alarm */}

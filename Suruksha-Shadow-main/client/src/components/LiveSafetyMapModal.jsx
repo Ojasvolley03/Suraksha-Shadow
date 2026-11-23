@@ -3,14 +3,49 @@ import L from "leaflet";
 import "leaflet/dist/leaflet.css";
 import { reverseGeocode, formatCoords } from "../lib/geo";
 
+const TILE_LAYERS = {
+  streets: {
+    name: "Map",
+    icon: "🗺️",
+    url: "https://{s}.google.com/vt/lyrs=m&x={x}&y={y}&z={z}",
+    options: {
+      maxZoom: 20,
+      subdomains: ["mt0", "mt1", "mt2", "mt3"],
+      attribution: "&copy; Google Maps",
+    },
+  },
+  satellite: {
+    name: "Satellite",
+    icon: "🛰️",
+    url: "https://{s}.google.com/vt/lyrs=y&x={x}&y={y}&z={z}",
+    options: {
+      maxZoom: 20,
+      subdomains: ["mt0", "mt1", "mt2", "mt3"],
+      attribution: "&copy; Google Maps",
+    },
+  },
+  terrain: {
+    name: "Terrain",
+    icon: "⛰️",
+    url: "https://{s}.google.com/vt/lyrs=p&x={x}&y={y}&z={z}",
+    options: {
+      maxZoom: 20,
+      subdomains: ["mt0", "mt1", "mt2", "mt3"],
+      attribution: "&copy; Google Maps",
+    },
+  },
+};
+
 export default function LiveSafetyMapModal({ isOpen, onClose }) {
   const mapContainerRef = useRef(null);
   const mapInstanceRef = useRef(null);
+  const currentTileLayerRef = useRef(null);
   const markerRef = useRef(null);
   const circleRef = useRef(null);
   const watchIdRef = useRef(null);
   const initialCenterSetRef = useRef(false);
 
+  const [activeLayer, setActiveLayer] = useState("streets");
   const [coords, setCoords] = useState(null); // { lat, lng, accuracy, timestamp }
   const [address, setAddress] = useState("");
   const [permissionStatus, setPermissionStatus] = useState("prompt"); // 'prompt' | 'granted' | 'denied' | 'unavailable'
@@ -195,6 +230,21 @@ export default function LiveSafetyMapModal({ isOpen, onClose }) {
     }
   }, [coords, updateMapPosition, requestLiveLocation]);
 
+  // Switch tile layer
+  const switchLayer = useCallback((layerKey) => {
+    if (!mapInstanceRef.current || !TILE_LAYERS[layerKey]) return;
+    const map = mapInstanceRef.current;
+
+    if (currentTileLayerRef.current) {
+      map.removeLayer(currentTileLayerRef.current);
+    }
+
+    const { url, options } = TILE_LAYERS[layerKey];
+    const newLayer = L.tileLayer(url, options).addTo(map);
+    currentTileLayerRef.current = newLayer;
+    setActiveLayer(layerKey);
+  }, []);
+
   // Initialize Leaflet map instance once the modal is open
   useEffect(() => {
     if (!isOpen) return;
@@ -216,12 +266,10 @@ export default function LiveSafetyMapModal({ isOpen, onClose }) {
       attributionControl: true,
     }).setView(initialPos, initialZoom);
 
-    // OpenStreetMap tile layer as explicitly requested
-    L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
-      maxZoom: 19,
-      attribution:
-        '&copy; <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener noreferrer">OpenStreetMap</a> contributors',
-    }).addTo(map);
+    // Modern Carto Voyager tiles (clean Google / Apple Maps look)
+    const initialConfig = TILE_LAYERS.streets;
+    const tileLayer = L.tileLayer(initialConfig.url, initialConfig.options).addTo(map);
+    currentTileLayerRef.current = tileLayer;
 
     mapInstanceRef.current = map;
 
@@ -329,6 +377,22 @@ export default function LiveSafetyMapModal({ isOpen, onClose }) {
             ref={mapContainerRef}
             className="leaflet-safety-canvas"
           />
+
+          {/* Floating Layer Switcher */}
+          <div className="app-map-layer-switch">
+            {Object.entries(TILE_LAYERS).map(([key, config]) => (
+              <button
+                key={key}
+                type="button"
+                className={`app-map-layer-btn ${activeLayer === key ? "is-active" : ""}`}
+                onClick={() => switchLayer(key)}
+                title={`Switch to ${config.name} Map`}
+              >
+                <span>{config.icon}</span>
+                <span>{config.name}</span>
+              </button>
+            ))}
+          </div>
 
           {/* Floating Action Button: 📍 My Location */}
           <button
